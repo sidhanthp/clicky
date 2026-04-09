@@ -2,7 +2,7 @@
 //  OpenAIAudioTranscriptionProvider.swift
 //  leanring-buddy
 //
-//  AI transcription provider backed by OpenAI's audio transcription API.
+//  Streaming transcription provider backed by the OpenAI Realtime API.
 //
 
 import AVFoundation
@@ -17,21 +17,18 @@ struct OpenAIAudioTranscriptionProviderError: LocalizedError {
 }
 
 final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
-    private let apiKey = AppBundleConfiguration.stringValue(forKey: "OpenAIAPIKey")
-    private let modelName = AppBundleConfiguration.stringValue(forKey: "OpenAITranscriptionModel")
-        ?? "gpt-4o-transcribe"
+    private static let transcriptionModelName = "gpt-4o-transcribe"
 
-    let displayName = "OpenAI"
+    let displayName = "OpenAI Realtime"
     let requiresSpeechRecognitionPermission = false
 
-    var isConfigured: Bool {
-        apiKey != nil
-    }
+    var isConfigured: Bool { true }
+    var unavailableExplanation: String? { nil }
 
-    var unavailableExplanation: String? {
-        guard !isConfigured else { return nil }
-        return "OpenAI transcription is not configured. Add OpenAIAPIKey to Info.plist."
-    }
+    /// Single long-lived URLSession shared across all streaming sessions.
+    /// Creating and invalidating a URLSession per session corrupts the OS
+    /// connection pool and causes avoidable websocket instability.
+    private let sharedWebSocketURLSession = URLSession(configuration: .default)
 
     func startStreamingSession(
         keyterms: [String],
@@ -39,72 +36,188 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) async throws -> any BuddyStreamingTranscriptionSession {
-        guard let apiKey else {
-            throw OpenAIAudioTranscriptionProviderError(
-                message: unavailableExplanation ?? "OpenAI transcription is not configured."
-            )
-        }
+        let clientSecret = try await fetchRealtimeClientSecret(keyterms: keyterms)
+        print("🎙️ OpenAI Realtime: fetched ephemeral client secret (\(clientSecret.prefix(20))...)")
 
-        return OpenAIAudioTranscriptionSession(
-            apiKey: apiKey,
-            modelName: modelName,
-            keyterms: keyterms,
+        let session = OpenAIRealtimeTranscriptionSession(
+            clientSecret: clientSecret,
+            urlSession: sharedWebSocketURLSession,
             onTranscriptUpdate: onTranscriptUpdate,
             onFinalTranscriptReady: onFinalTranscriptReady,
             onError: onError
         )
+
+        try await session.open()
+        return session
+    }
+
+    private func fetchRealtimeClientSecret(keyterms: [String]) async throws -> String {
+        var request = URLRequest(url: URL(string: ProxyConfiguration.transcriptionSessionProxyURLString)!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(
+            withJSONObject: makeRealtimeSessionRequestBody(keyterms: keyterms)
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? "unknown"
+            throw OpenAIAudioTranscriptionProviderError(
+                message: "Failed to create OpenAI transcription session (HTTP \(statusCode)): \(body)"
+            )
+        }
+
+        return try extractClientSecret(from: data)
+    }
+
+    private func makeRealtimeSessionRequestBody(keyterms: [String]) -> [String: Any] {
+        let prompt = makeTranscriptionBiasPrompt(from: keyterms)
+
+        return [
+            "input_audio_format": "pcm16",
+            "input_audio_transcription": [
+                "model": Self.transcriptionModelName,
+                "prompt": prompt,
+                "language": "en"
+            ],
+            "turn_detection": [
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 500
+            ],
+            "input_audio_noise_reduction": [
+                "type": "near_field"
+            ]
+        ]
+    }
+
+    private func makeTranscriptionBiasPrompt(from keyterms: [String]) -> String {
+        let trimmedKeyterms = keyterms
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !trimmedKeyterms.isEmpty else {
+            return ""
+        }
+
+        return "Bias transcription toward these product and app terms when they are spoken: \(trimmedKeyterms.joined(separator: ", "))"
+    }
+
+    private func extractClientSecret(from responseData: Data) throws -> String {
+        guard let responseJSONObject = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            throw OpenAIAudioTranscriptionProviderError(
+                message: "Invalid transcription session response from proxy."
+            )
+        }
+
+        if let clientSecretObject = responseJSONObject["client_secret"] as? [String: Any],
+           let clientSecretValue = clientSecretObject["value"] as? String,
+           !clientSecretValue.isEmpty {
+            return clientSecretValue
+        }
+
+        if let clientSecretValue = responseJSONObject["client_secret"] as? String,
+           !clientSecretValue.isEmpty {
+            return clientSecretValue
+        }
+
+        throw OpenAIAudioTranscriptionProviderError(
+            message: "Proxy response did not include a client secret."
+        )
     }
 }
 
-private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscriptionSession {
-    let finalTranscriptFallbackDelaySeconds: TimeInterval = 8.0
-
-    private struct TranscriptionResponse: Decodable {
-        let text: String
+private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreamingTranscriptionSession {
+    private struct EventEnvelope: Decodable {
+        let type: String
     }
 
-    private static let transcriptionURL = URL(string: "https://api.openai.com/v1/audio/transcriptions")!
-    private static let targetSampleRate = 16_000
+    private struct InputAudioBufferCommittedEvent: Decodable {
+        let type: String
+        let item_id: String
+        let previous_item_id: String?
+    }
 
-    private let apiKey: String
-    private let modelName: String
-    private let keyterms: [String]
+    private struct InputAudioTranscriptionDeltaEvent: Decodable {
+        let type: String
+        let item_id: String
+        let delta: String
+    }
+
+    private struct InputAudioTranscriptionCompletedEvent: Decodable {
+        let type: String
+        let item_id: String
+        let transcript: String
+    }
+
+    private struct ErrorEvent: Decodable {
+        struct ErrorDetails: Decodable {
+            let message: String?
+        }
+
+        let type: String
+        let error: ErrorDetails?
+        let message: String?
+    }
+
+    private static let websocketURLString = "wss://api.openai.com/v1/realtime?intent=transcription"
+    private static let targetSampleRate = 16_000.0
+    private static let explicitFinalTranscriptGracePeriodSeconds = 1.4
+
+    let finalTranscriptFallbackDelaySeconds: TimeInterval = 2.8
+
+    private let clientSecret: String
     private let onTranscriptUpdate: (String) -> Void
     private let onFinalTranscriptReady: (String) -> Void
     private let onError: (Error) -> Void
 
-    private let stateQueue = DispatchQueue(label: "com.learningbuddy.openai.transcription")
-    private let audioPCM16Converter = BuddyPCM16AudioConverter(
-        targetSampleRate: Double(targetSampleRate)
-    )
+    private let stateQueue = DispatchQueue(label: "com.learningbuddy.openai.realtime.state")
+    private let sendQueue = DispatchQueue(label: "com.learningbuddy.openai.realtime.send")
+    private let audioPCM16Converter = BuddyPCM16AudioConverter(targetSampleRate: targetSampleRate)
     private let urlSession: URLSession
 
-    private var bufferedPCM16AudioData = Data()
-    private var hasRequestedFinalTranscript = false
+    private var webSocketTask: URLSessionWebSocketTask?
     private var hasDeliveredFinalTranscript = false
-    private var isCancelled = false
-    private var transcriptionUploadTask: Task<Void, Never>?
+    private var isAwaitingExplicitFinalTranscript = false
+    private var latestTranscriptText = ""
+    private var committedItemOrder: [String] = []
+    private var finalizedTranscriptByItemID: [String: String] = [:]
+    private var inProgressTranscriptByItemID: [String: String] = [:]
+    private var explicitFinalTranscriptDeadlineWorkItem: DispatchWorkItem?
 
     init(
-        apiKey: String,
-        modelName: String,
-        keyterms: [String],
+        clientSecret: String,
+        urlSession: URLSession,
         onTranscriptUpdate: @escaping (String) -> Void,
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) {
-        self.apiKey = apiKey
-        self.modelName = modelName
-        self.keyterms = keyterms
+        self.clientSecret = clientSecret
+        self.urlSession = urlSession
         self.onTranscriptUpdate = onTranscriptUpdate
         self.onFinalTranscriptReady = onFinalTranscriptReady
         self.onError = onError
+    }
 
-        let urlSessionConfiguration = URLSessionConfiguration.default
-        urlSessionConfiguration.timeoutIntervalForRequest = 45
-        urlSessionConfiguration.timeoutIntervalForResource = 90
-        urlSessionConfiguration.waitsForConnectivity = true
-        self.urlSession = URLSession(configuration: urlSessionConfiguration)
+    func open() async throws {
+        guard let websocketURL = URL(string: Self.websocketURLString) else {
+            throw OpenAIAudioTranscriptionProviderError(
+                message: "OpenAI Realtime websocket URL is invalid."
+            )
+        }
+
+        var websocketRequest = URLRequest(url: websocketURL)
+        websocketRequest.setValue("Bearer \(clientSecret)", forHTTPHeaderField: "Authorization")
+
+        let webSocketTask = urlSession.webSocketTask(with: websocketRequest)
+        self.webSocketTask = webSocketTask
+        webSocketTask.resume()
+
+        receiveNextMessage()
     }
 
     func appendAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
@@ -113,205 +226,241 @@ private final class OpenAIAudioTranscriptionSession: BuddyStreamingTranscription
             return
         }
 
-        stateQueue.async {
-            guard !self.hasRequestedFinalTranscript, !self.isCancelled else { return }
-            self.bufferedPCM16AudioData.append(audioPCM16Data)
-        }
+        let base64EncodedAudio = audioPCM16Data.base64EncodedString()
+
+        sendJSONMessage([
+            "type": "input_audio_buffer.append",
+            "audio": base64EncodedAudio
+        ])
     }
 
     func requestFinalTranscript() {
         stateQueue.async {
-            guard !self.hasRequestedFinalTranscript, !self.isCancelled else { return }
-            self.hasRequestedFinalTranscript = true
-
-            let bufferedPCM16AudioData = self.bufferedPCM16AudioData
-            self.transcriptionUploadTask = Task { [weak self] in
-                await self?.transcribeBufferedAudio(bufferedPCM16AudioData)
-            }
+            guard !self.hasDeliveredFinalTranscript else { return }
+            self.isAwaitingExplicitFinalTranscript = true
+            self.scheduleExplicitFinalTranscriptDeadline()
         }
+
+        sendJSONMessage([
+            "type": "input_audio_buffer.commit"
+        ])
     }
 
     func cancel() {
         stateQueue.async {
-            self.isCancelled = true
-            self.bufferedPCM16AudioData.removeAll(keepingCapacity: false)
+            self.explicitFinalTranscriptDeadlineWorkItem?.cancel()
+            self.explicitFinalTranscriptDeadlineWorkItem = nil
         }
 
-        transcriptionUploadTask?.cancel()
-        urlSession.invalidateAndCancel()
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
     }
 
-    private func transcribeBufferedAudio(_ bufferedPCM16AudioData: Data) async {
-        guard !Task.isCancelled else { return }
+    private func receiveNextMessage() {
+        webSocketTask?.receive { [weak self] result in
+            guard let self else { return }
 
-        let trimmedAudioDataIsEmpty = stateQueue.sync {
-            isCancelled || bufferedPCM16AudioData.isEmpty
+            switch result {
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    self.handleIncomingTextMessage(text)
+                case .data(let data):
+                    if let text = String(data: data, encoding: .utf8) {
+                        self.handleIncomingTextMessage(text)
+                    }
+                @unknown default:
+                    break
+                }
+
+                self.receiveNextMessage()
+            case .failure(let error):
+                self.failSession(with: error)
+            }
         }
+    }
 
-        if trimmedAudioDataIsEmpty {
-            deliverFinalTranscript("")
+    private func handleIncomingTextMessage(_ text: String) {
+        guard let messageData = text.data(using: .utf8) else { return }
+
+        do {
+            let eventEnvelope = try JSONDecoder().decode(EventEnvelope.self, from: messageData)
+
+            switch eventEnvelope.type {
+            case "input_audio_buffer.committed":
+                let committedEvent = try JSONDecoder().decode(
+                    InputAudioBufferCommittedEvent.self,
+                    from: messageData
+                )
+                handleCommittedEvent(committedEvent)
+            case "conversation.item.input_audio_transcription.delta":
+                let deltaEvent = try JSONDecoder().decode(
+                    InputAudioTranscriptionDeltaEvent.self,
+                    from: messageData
+                )
+                handleDeltaEvent(deltaEvent)
+            case "conversation.item.input_audio_transcription.completed":
+                let completedEvent = try JSONDecoder().decode(
+                    InputAudioTranscriptionCompletedEvent.self,
+                    from: messageData
+                )
+                handleCompletedEvent(completedEvent)
+            case "error":
+                let errorEvent = try JSONDecoder().decode(ErrorEvent.self, from: messageData)
+                let errorMessage = errorEvent.error?.message ?? errorEvent.message ?? "OpenAI Realtime returned an error."
+                failSession(with: OpenAIAudioTranscriptionProviderError(message: errorMessage))
+            default:
+                break
+            }
+        } catch {
+            failSession(with: error)
+        }
+    }
+
+    private func handleCommittedEvent(_ event: InputAudioBufferCommittedEvent) {
+        stateQueue.async {
+            self.insertCommittedItemID(event.item_id, after: event.previous_item_id)
+        }
+    }
+
+    private func handleDeltaEvent(_ event: InputAudioTranscriptionDeltaEvent) {
+        let deltaText = event.delta.trimmingCharacters(in: .newlines)
+
+        stateQueue.async {
+            let existingTranscriptText = self.inProgressTranscriptByItemID[event.item_id] ?? ""
+            self.inProgressTranscriptByItemID[event.item_id] = existingTranscriptText + deltaText
+            self.insertCommittedItemID(event.item_id, after: nil)
+            self.publishLatestTranscriptIfNeeded()
+        }
+    }
+
+    private func handleCompletedEvent(_ event: InputAudioTranscriptionCompletedEvent) {
+        let transcriptText = event.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        stateQueue.async {
+            self.insertCommittedItemID(event.item_id, after: nil)
+            self.finalizedTranscriptByItemID[event.item_id] = transcriptText
+            self.inProgressTranscriptByItemID[event.item_id] = nil
+            self.publishLatestTranscriptIfNeeded()
+
+            guard self.isAwaitingExplicitFinalTranscript else { return }
+
+            self.explicitFinalTranscriptDeadlineWorkItem?.cancel()
+            self.explicitFinalTranscriptDeadlineWorkItem = nil
+            self.deliverFinalTranscriptIfNeeded(self.bestAvailableTranscriptText())
+        }
+    }
+
+    private func insertCommittedItemID(_ itemID: String, after previousItemID: String?) {
+        guard !committedItemOrder.contains(itemID) else { return }
+
+        if let previousItemID,
+           let previousIndex = committedItemOrder.firstIndex(of: previousItemID) {
+            committedItemOrder.insert(itemID, at: previousIndex + 1)
             return
         }
 
-        let wavAudioData = BuddyWAVFileBuilder.buildWAVData(
-            fromPCM16MonoAudio: bufferedPCM16AudioData,
-            sampleRate: Self.targetSampleRate
-        )
+        committedItemOrder.append(itemID)
+    }
 
-        do {
-            let transcriptText = try await requestTranscription(for: wavAudioData)
-            guard !stateQueue.sync(execute: { isCancelled }) else { return }
+    private func publishLatestTranscriptIfNeeded() {
+        let fullTranscriptText = composeFullTranscript()
+        latestTranscriptText = fullTranscriptText
 
-            if !transcriptText.isEmpty {
-                onTranscriptUpdate(transcriptText)
+        if !fullTranscriptText.isEmpty {
+            onTranscriptUpdate(fullTranscriptText)
+        }
+    }
+
+    private func composeFullTranscript() -> String {
+        var transcriptSegments: [String] = []
+
+        for itemID in committedItemOrder {
+            let finalizedTranscriptText = finalizedTranscriptByItemID[itemID]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let inProgressTranscriptText = inProgressTranscriptByItemID[itemID]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let finalizedTranscriptText, !finalizedTranscriptText.isEmpty {
+                transcriptSegments.append(finalizedTranscriptText)
+                continue
             }
 
-            deliverFinalTranscript(transcriptText)
-        } catch {
-            guard !stateQueue.sync(execute: { isCancelled }) else { return }
-            print("[OpenAI Transcription] ❌ Upload failed (audio size: \(wavAudioData.count) bytes): \(error.localizedDescription)")
-            onError(error)
+            if let inProgressTranscriptText, !inProgressTranscriptText.isEmpty {
+                transcriptSegments.append(inProgressTranscriptText)
+            }
         }
+
+        return transcriptSegments.joined(separator: " ")
     }
 
-    private func requestTranscription(for wavAudioData: Data) async throws -> String {
-        let multipartBoundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: Self.transcriptionURL)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(multipartBoundary)", forHTTPHeaderField: "Content-Type")
+    private func scheduleExplicitFinalTranscriptDeadline() {
+        explicitFinalTranscriptDeadlineWorkItem?.cancel()
 
-        let requestBodyData = makeMultipartRequestBody(
-            boundary: multipartBoundary,
-            wavAudioData: wavAudioData
-        )
-        request.httpBody = requestBodyData
-
-        let (responseData, response) = try await urlSession.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw OpenAIAudioTranscriptionProviderError(
-                message: "OpenAI transcription returned an invalid response."
-            )
+        let deadlineWorkItem = DispatchWorkItem { [weak self] in
+            self?.stateQueue.async {
+                guard let self else { return }
+                self.deliverFinalTranscriptIfNeeded(self.bestAvailableTranscriptText())
+            }
         }
 
-        guard (200...299).contains(httpResponse.statusCode) else {
-            let responseText = String(data: responseData, encoding: .utf8) ?? "Unknown error"
-            throw OpenAIAudioTranscriptionProviderError(
-                message: "OpenAI transcription failed: \(responseText)"
-            )
-        }
+        explicitFinalTranscriptDeadlineWorkItem = deadlineWorkItem
 
-        if let transcriptionResponse = try? JSONDecoder().decode(
-            TranscriptionResponse.self,
-            from: responseData
-        ) {
-            return transcriptionResponse.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        let responseText = String(data: responseData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-        if !responseText.isEmpty {
-            return responseText
-        }
-
-        throw OpenAIAudioTranscriptionProviderError(
-            message: "OpenAI transcription returned an empty transcript."
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.explicitFinalTranscriptGracePeriodSeconds,
+            execute: deadlineWorkItem
         )
     }
 
-    private func makeMultipartRequestBody(
-        boundary: String,
-        wavAudioData: Data
-    ) -> Data {
-        var requestBodyData = Data()
-
-        requestBodyData.appendMultipartFormField(
-            named: "model",
-            value: modelName,
-            usingBoundary: boundary
-        )
-        requestBodyData.appendMultipartFormField(
-            named: "language",
-            value: "en",
-            usingBoundary: boundary
-        )
-        requestBodyData.appendMultipartFormField(
-            named: "response_format",
-            value: "json",
-            usingBoundary: boundary
-        )
-
-        if let contextualPrompt = transcriptionPromptText() {
-            requestBodyData.appendMultipartFormField(
-                named: "prompt",
-                value: contextualPrompt,
-                usingBoundary: boundary
-            )
-        }
-
-        requestBodyData.appendMultipartFileField(
-            named: "file",
-            filename: "voice-input.wav",
-            mimeType: "audio/wav",
-            fileData: wavAudioData,
-            usingBoundary: boundary
-        )
-        requestBodyData.appendString("--\(boundary)--\r\n")
-
-        return requestBodyData
-    }
-
-    private func transcriptionPromptText() -> String? {
-        let normalizedKeyterms = keyterms
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !normalizedKeyterms.isEmpty else { return nil }
-
-        return """
-        This is a short push-to-talk transcript for a coding and product app. Expect product names, technical terms, and app-specific vocabulary such as: \(normalizedKeyterms.joined(separator: ", ")).
-        """
-    }
-
-    private func deliverFinalTranscript(_ transcriptText: String) {
+    private func deliverFinalTranscriptIfNeeded(_ transcriptText: String) {
         guard !hasDeliveredFinalTranscript else { return }
         hasDeliveredFinalTranscript = true
+        explicitFinalTranscriptDeadlineWorkItem?.cancel()
+        explicitFinalTranscriptDeadlineWorkItem = nil
         onFinalTranscriptReady(transcriptText)
+        webSocketTask?.cancel(with: .normalClosure, reason: nil)
     }
 
-    deinit {
-        cancel()
-    }
-}
+    private func sendJSONMessage(_ payload: [String: Any]) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            return
+        }
 
-private extension Data {
-    mutating func appendString(_ string: String) {
-        append(string.data(using: .utf8)!)
-    }
-
-    mutating func appendMultipartFormField(
-        named fieldName: String,
-        value: String,
-        usingBoundary boundary: String
-    ) {
-        appendString("--\(boundary)\r\n")
-        appendString("Content-Disposition: form-data; name=\"\(fieldName)\"\r\n\r\n")
-        appendString("\(value)\r\n")
+        sendQueue.async { [weak self] in
+            guard let self, let webSocketTask = self.webSocketTask else { return }
+            webSocketTask.send(.string(jsonString)) { [weak self] error in
+                if let error {
+                    self?.failSession(with: error)
+                }
+            }
+        }
     }
 
-    mutating func appendMultipartFileField(
-        named fieldName: String,
-        filename: String,
-        mimeType: String,
-        fileData: Data,
-        usingBoundary boundary: String
-    ) {
-        appendString("--\(boundary)\r\n")
-        appendString("Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(filename)\"\r\n")
-        appendString("Content-Type: \(mimeType)\r\n\r\n")
-        append(fileData)
-        appendString("\r\n")
+    private func failSession(with error: Error) {
+        stateQueue.async {
+            let latestTranscriptText = self.bestAvailableTranscriptText()
+
+            if self.isAwaitingExplicitFinalTranscript
+                && !self.hasDeliveredFinalTranscript
+                && !latestTranscriptText.isEmpty {
+                print("[OpenAI Realtime] ⚠️ WebSocket error during active session, delivering partial transcript as fallback: \(error.localizedDescription)")
+                self.deliverFinalTranscriptIfNeeded(latestTranscriptText)
+                return
+            }
+
+            print("[OpenAI Realtime] ❌ Session failed with error: \(error.localizedDescription)")
+            self.onError(error)
+        }
+    }
+
+    private func bestAvailableTranscriptText() -> String {
+        let composedTranscriptText = composeFullTranscript()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !composedTranscriptText.isEmpty {
+            return composedTranscriptText
+        }
+
+        return latestTranscriptText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
