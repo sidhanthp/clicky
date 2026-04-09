@@ -289,6 +289,7 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
     private var finalizedTranscriptByItemID: [String: String] = [:]
     private var inProgressTranscriptByItemID: [String: String] = [:]
     private var explicitFinalTranscriptDeadlineWorkItem: DispatchWorkItem?
+    private var isSocketShutdownExpected = false
 
     init(
         authorizationBearerToken: String,
@@ -355,6 +356,7 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
 
     func cancel() {
         stateQueue.async {
+            self.isSocketShutdownExpected = true
             self.explicitFinalTranscriptDeadlineWorkItem?.cancel()
             self.explicitFinalTranscriptDeadlineWorkItem = nil
         }
@@ -521,6 +523,7 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
     private func deliverFinalTranscriptIfNeeded(_ transcriptText: String) {
         guard !hasDeliveredFinalTranscript else { return }
         hasDeliveredFinalTranscript = true
+        isSocketShutdownExpected = true
         explicitFinalTranscriptDeadlineWorkItem?.cancel()
         explicitFinalTranscriptDeadlineWorkItem = nil
         onFinalTranscriptReady(transcriptText)
@@ -545,6 +548,10 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
 
     private func failSession(with error: Error) {
         stateQueue.async {
+            if self.isSocketShutdownExpected || self.hasDeliveredFinalTranscript {
+                return
+            }
+
             let latestTranscriptText = self.bestAvailableTranscriptText()
 
             if self.isAwaitingExplicitFinalTranscript

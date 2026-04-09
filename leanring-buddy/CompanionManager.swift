@@ -747,6 +747,10 @@ final class CompanionManager: ObservableObject {
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
+                        if Task.isCancelled || isExpectedRequestCancellationError(error) {
+                            return
+                        }
+
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ OpenAI TTS error: \(error)")
                         speakRemoteAPIFailureFallback(for: error)
@@ -755,6 +759,10 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
+                if Task.isCancelled || isExpectedRequestCancellationError(error) {
+                    return
+                }
+
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
                 speakRemoteAPIFailureFallback(for: error)
@@ -829,6 +837,15 @@ final class CompanionManager: ObservableObject {
         ]
 
         return quotaErrorMarkers.contains { errorDescription.contains($0) }
+    }
+
+    private func isExpectedRequestCancellationError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
     // MARK: - Point Tag Parsing
