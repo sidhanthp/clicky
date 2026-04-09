@@ -17,7 +17,8 @@ struct OpenAIAudioTranscriptionProviderError: LocalizedError {
 }
 
 final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
-    private static let transcriptionModelName = "gpt-4o-transcribe"
+    private static let transcriptionModelName = "gpt-4o-transcribe-latest"
+    private static let realtimeInputSampleRate = 24_000
 
     let displayName = "OpenAI Realtime"
     let requiresSpeechRecognitionPermission = false
@@ -77,20 +78,28 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         let prompt = makeTranscriptionBiasPrompt(from: keyterms)
 
         return [
-            "input_audio_format": "pcm16",
-            "input_audio_transcription": [
-                "model": Self.transcriptionModelName,
-                "prompt": prompt,
-                "language": "en"
-            ],
-            "turn_detection": [
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500
-            ],
-            "input_audio_noise_reduction": [
-                "type": "near_field"
+            "type": "transcription",
+            "audio": [
+                "input": [
+                    "format": [
+                        "type": "audio/pcm",
+                        "rate": Self.realtimeInputSampleRate
+                    ],
+                    "noise_reduction": [
+                        "type": "near_field"
+                    ],
+                    "transcription": [
+                        "model": Self.transcriptionModelName,
+                        "prompt": prompt,
+                        "language": "en"
+                    ],
+                    "turn_detection": [
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500
+                    ]
+                ]
             ]
         ]
     }
@@ -165,7 +174,7 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
     }
 
     private static let websocketURLString = "wss://api.openai.com/v1/realtime?intent=transcription"
-    private static let targetSampleRate = 16_000.0
+    private static let targetSampleRate = 24_000.0
     private static let explicitFinalTranscriptGracePeriodSeconds = 1.4
 
     let finalTranscriptFallbackDelaySeconds: TimeInterval = 2.8
