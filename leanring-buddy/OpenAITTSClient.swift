@@ -11,15 +11,26 @@ import Foundation
 
 @MainActor
 final class OpenAITTSClient {
-    private let proxyURL: URL
+    private let requestURL: URL
+    private let authorizationHeaderValue: String?
+    private let model: String
+    private let voice: String
     private let session: URLSession
 
     /// The audio player for the current TTS playback. Kept alive so the
     /// audio finishes playing even if the caller doesn't hold a reference.
     private var audioPlayer: AVAudioPlayer?
 
-    init(proxyURL: String) {
-        self.proxyURL = URL(string: proxyURL)!
+    init(
+        requestURL: String,
+        authorizationHeaderValue: String?,
+        model: String,
+        voice: String
+    ) {
+        self.requestURL = URL(string: requestURL)!
+        self.authorizationHeaderValue = authorizationHeaderValue
+        self.model = model
+        self.voice = voice
 
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
@@ -30,12 +41,18 @@ final class OpenAITTSClient {
     /// Sends `text` to the OpenAI speech API and plays the resulting audio.
     /// Throws on network or decoding errors. Cancellation-safe.
     func speakText(_ text: String) async throws {
-        var request = URLRequest(url: proxyURL)
+        var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+        if let authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
 
         let body: [String: Any] = [
+            "model": model,
+            "voice": voice,
+            "format": "mp3",
             "input": text
         ]
 

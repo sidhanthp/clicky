@@ -135,10 +135,12 @@ final class MenuBarPanelManager: NSObject {
 
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
+        print("🪟 MenuBarPanelManager: showPanel")
         installClickOutsideMonitor()
     }
 
     private func hidePanel() {
+        print("🪟 MenuBarPanelManager: hidePanel")
         panel?.orderOut(nil)
         removeClickOutsideMonitor()
     }
@@ -208,15 +210,28 @@ final class MenuBarPanelManager: NSObject {
 
         clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
-        ) { [weak self] event in
+        ) { [weak self] _ in
             guard let self, let panel = self.panel else { return }
 
-            // Check if the click is inside the status item button — if so, the
-            // statusItemClicked handler will toggle the panel, so don't also hide.
             let clickLocation = NSEvent.mouseLocation
-            if panel.frame.contains(clickLocation) {
+            let isClickInsidePanel = panel.frame.contains(clickLocation)
+            let isClickInsideStatusItemButton = self.statusItem?.button?.window?.frame.contains(clickLocation) ?? false
+
+            // Ignore the same status-item click that opened the panel. Without
+            // this, the global monitor schedules a hide a fraction of a second
+            // after opening, which feels like the panel "clicked out" on its own.
+            if isClickInsidePanel || isClickInsideStatusItemButton {
+                print(
+                    "🪟 MenuBarPanelManager: ignoring clickOutsideMonitor event " +
+                    "(insidePanel: \(isClickInsidePanel), insideStatusItem: \(isClickInsideStatusItemButton))"
+                )
                 return
             }
+
+            print(
+                "🪟 MenuBarPanelManager: scheduling panel hide from global click " +
+                "at (\(Int(clickLocation.x)), \(Int(clickLocation.y)))"
+            )
 
             // Delay dismissal slightly to avoid closing the panel when
             // a system permission dialog appears (e.g. microphone access).
@@ -226,9 +241,11 @@ final class MenuBarPanelManager: NSObject {
                 // If permissions aren't all granted yet, a system dialog
                 // may have focus — don't dismiss during onboarding.
                 if !self.companionManager.allPermissionsGranted && !NSApp.isActive {
+                    print("🪟 MenuBarPanelManager: keeping panel open because onboarding permissions dialog is active")
                     return
                 }
 
+                print("🪟 MenuBarPanelManager: hiding panel after outside click")
                 self.hidePanel()
             }
         }

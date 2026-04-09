@@ -9,6 +9,13 @@ import Foundation
 
 enum AppBundleConfiguration {
     static func stringValue(forKey key: String) -> String? {
+        if let environmentValue = ProcessInfo.processInfo.environment[key] {
+            let trimmedEnvironmentValue = environmentValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedEnvironmentValue.isEmpty {
+                return trimmedEnvironmentValue
+            }
+        }
+
         if let value = Bundle.main.object(forInfoDictionaryKey: key) as? String {
             let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedValue.isEmpty {

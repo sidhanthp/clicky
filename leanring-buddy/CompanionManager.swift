@@ -70,13 +70,19 @@ final class CompanionManager: ObservableObject {
 
     private lazy var openAIResponsesAPI: OpenAIResponsesAPI = {
         return OpenAIResponsesAPI(
-            proxyURL: ProxyConfiguration.responsesProxyURLString,
+            requestURL: ProxyConfiguration.responsesProxyURLString,
+            authorizationHeaderValue: ProxyConfiguration.authorizationHeaderValue,
             model: selectedModel
         )
     }()
 
     private lazy var openAITTSClient: OpenAITTSClient = {
-        return OpenAITTSClient(proxyURL: ProxyConfiguration.speechProxyURLString)
+        return OpenAITTSClient(
+            requestURL: ProxyConfiguration.speechProxyURLString,
+            authorizationHeaderValue: ProxyConfiguration.authorizationHeaderValue,
+            model: ProxyConfiguration.textToSpeechModel,
+            voice: ProxyConfiguration.textToSpeechVoice
+        )
     }()
 
     /// Conversation history so the model remembers prior exchanges within a session.
@@ -110,11 +116,27 @@ final class CompanionManager: ObservableObject {
     @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedOpenAIModel")
         ?? UserDefaults.standard.string(forKey: "selectedClaudeModel")
         ?? "gpt-5.4"
+    @Published var selectedRealtimeTranscriptionModel: String = OpenAIRealtimeTranscriptionModel
+        .currentSelection
+        .rawValue
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
         UserDefaults.standard.set(model, forKey: "selectedOpenAIModel")
         openAIResponsesAPI.model = model
+    }
+
+    var supportsRealtimeTranscriptionModelSelection: Bool {
+        buddyDictationManager.supportsRealtimeTranscriptionModelSelection
+    }
+
+    func setSelectedRealtimeTranscriptionModel(_ model: String) {
+        guard let realtimeTranscriptionModel = OpenAIRealtimeTranscriptionModel(rawValue: model) else {
+            return
+        }
+
+        selectedRealtimeTranscriptionModel = realtimeTranscriptionModel.rawValue
+        OpenAIRealtimeTranscriptionModel.persistSelection(realtimeTranscriptionModel)
     }
 
     /// User preference for whether the Clicky cursor should be shown.
@@ -175,6 +197,13 @@ final class CompanionManager: ObservableObject {
 
     func start() {
         refreshAllPermissions()
+        print(
+            "🌐 Clicky transport: " +
+            (ProxyConfiguration.shouldUseDirectOpenAI
+                ? "direct OpenAI"
+                : "worker proxy (\(ProxyConfiguration.workerBaseURLString))")
+        )
+        print("🎙️ Clicky transcription model: \(selectedRealtimeTranscriptionModel)")
         print("🔑 Clicky start — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission), onboarded: \(hasCompletedOnboarding)")
         startPermissionPolling()
         bindVoiceStateObservation()
@@ -472,11 +501,23 @@ final class CompanionManager: ObservableObject {
     }
 
     private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
+        print(
+            "⌨️ CompanionManager: handleShortcutTransition(\(transition)) " +
+            "(isDictationInProgress: \(buddyDictationManager.isDictationInProgress), " +
+            "showOnboardingVideo: \(showOnboardingVideo), voiceState: \(voiceState))"
+        )
+
         switch transition {
         case .pressed:
-            guard !buddyDictationManager.isDictationInProgress else { return }
+            guard !buddyDictationManager.isDictationInProgress else {
+                print("⌨️ CompanionManager: ignoring pressed transition because dictation is already in progress")
+                return
+            }
             // Don't register push-to-talk while the onboarding video is playing
-            guard !showOnboardingVideo else { return }
+            guard !showOnboardingVideo else {
+                print("⌨️ CompanionManager: ignoring pressed transition because onboarding video is active")
+                return
+            }
 
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
@@ -708,7 +749,7 @@ final class CompanionManager: ObservableObject {
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
                         print("⚠️ OpenAI TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        speakRemoteAPIFailureFallback(for: error)
                     }
                 }
             } catch is CancellationError {
@@ -716,7 +757,7 @@ final class CompanionManager: ObservableObject {
             } catch {
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                speakRemoteAPIFailureFallback(for: error)
             }
 
             if !Task.isCancelled {
@@ -756,14 +797,38 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// the remote speech API is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+    /// Speaks a local fallback message using macOS system TTS when the remote
+    /// OpenAI response or speech request fails. Quota-specific wording is only
+    /// used when the error strongly indicates a real billing or quota problem.
+    private func speakRemoteAPIFailureFallback(for error: Error) {
+        let utterance: String
+
+        if isLikelyQuotaError(error) {
+            utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+        } else if ProxyConfiguration.shouldUseDirectOpenAI {
+            utterance = "The OpenAI request failed. Check the Xcode console for the exact error."
+        } else {
+            utterance = "Clicky hit an API error. Check the Xcode console for the exact error."
+        }
+
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
+    }
+
+    private func isLikelyQuotaError(_ error: Error) -> Bool {
+        let errorDescription = error.localizedDescription.lowercased()
+
+        let quotaErrorMarkers = [
+            "insufficient_quota",
+            "quota",
+            "rate limit reached for requests",
+            "billing",
+            "credits",
+            "exceeded your current quota"
+        ]
+
+        return quotaErrorMarkers.contains { errorDescription.contains($0) }
     }
 
     // MARK: - Point Tag Parsing

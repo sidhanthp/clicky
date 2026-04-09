@@ -10,12 +10,14 @@ final class OpenAIResponsesAPI {
     private static let tlsWarmupLock = NSLock()
     private static var hasStartedTLSWarmup = false
 
-    private let proxyURL: URL
+    private let requestURL: URL
+    private let authorizationHeaderValue: String?
     var model: String
     private let session: URLSession
 
-    init(proxyURL: String, model: String = "gpt-5.4") {
-        self.proxyURL = URL(string: proxyURL)!
+    init(requestURL: String, authorizationHeaderValue: String?, model: String = "gpt-5.4") {
+        self.requestURL = URL(string: requestURL)!
+        self.authorizationHeaderValue = authorizationHeaderValue
         self.model = model
 
         let configuration = URLSessionConfiguration.default
@@ -30,11 +32,14 @@ final class OpenAIResponsesAPI {
     }
 
     private func makeRequest(acceptHeaderValue: String) -> URLRequest {
-        var request = URLRequest(url: proxyURL)
+        var request = URLRequest(url: requestURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(acceptHeaderValue, forHTTPHeaderField: "Accept")
+        if let authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 
@@ -48,7 +53,7 @@ final class OpenAIResponsesAPI {
 
         guard shouldStartTLSWarmup else { return }
 
-        guard var warmupURLComponents = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false) else {
+        guard var warmupURLComponents = URLComponents(url: requestURL, resolvingAgainstBaseURL: false) else {
             return
         }
 

@@ -262,6 +262,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         return AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
     }
 
+    var supportsRealtimeTranscriptionModelSelection: Bool {
+        transcriptionProvider is OpenAIAudioTranscriptionProvider
+    }
+
     private let transcriptionProvider: any BuddyTranscriptionProvider
     private let audioEngine = AVAudioEngine()
     private var activeTranscriptionSession: (any BuddyStreamingTranscriptionSession)?

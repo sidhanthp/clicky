@@ -105,10 +105,13 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             if let globalEventTap {
                 CGEvent.tapEnable(tap: globalEventTap, enable: true)
             }
+            print("⌨️ Global push-to-talk: re-enabled event tap after \(eventType)")
             return Unmanaged.passUnretained(event)
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+            .intersection(.deviceIndependentFlagsMask)
         let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
             for: eventType,
             keyCode: eventKeyCode,
@@ -120,13 +123,50 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         case .none:
             break
         case .pressed:
+            print(
+                "⌨️ Global push-to-talk: pressed " +
+                "(eventType: \(eventType), keyCode: \(eventKeyCode), flags: \(debugDescription(for: modifierFlags)))"
+            )
             isShortcutCurrentlyPressed = true
             shortcutTransitionPublisher.send(.pressed)
         case .released:
+            print(
+                "⌨️ Global push-to-talk: released " +
+                "(eventType: \(eventType), keyCode: \(eventKeyCode), flags: \(debugDescription(for: modifierFlags)))"
+            )
             isShortcutCurrentlyPressed = false
             shortcutTransitionPublisher.send(.released)
         }
 
         return Unmanaged.passUnretained(event)
+    }
+
+    private func debugDescription(for modifierFlags: NSEvent.ModifierFlags) -> String {
+        var flagNames: [String] = []
+
+        if modifierFlags.contains(.control) {
+            flagNames.append("control")
+        }
+        if modifierFlags.contains(.option) {
+            flagNames.append("option")
+        }
+        if modifierFlags.contains(.shift) {
+            flagNames.append("shift")
+        }
+        if modifierFlags.contains(.command) {
+            flagNames.append("command")
+        }
+        if modifierFlags.contains(.function) {
+            flagNames.append("function")
+        }
+        if modifierFlags.contains(.capsLock) {
+            flagNames.append("capsLock")
+        }
+
+        if flagNames.isEmpty {
+            return "none"
+        }
+
+        return flagNames.joined(separator: "+")
     }
 }

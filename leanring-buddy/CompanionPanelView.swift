@@ -31,6 +31,14 @@ struct CompanionPanelView: View {
 
                 modelPickerRow
                     .padding(.horizontal, 16)
+
+                if companionManager.supportsRealtimeTranscriptionModelSelection {
+                    Spacer()
+                        .frame(height: 8)
+
+                    transcriptionModelPickerRow
+                        .padding(.horizontal, 16)
+                }
             }
 
             if !companionManager.allPermissionsGranted {
@@ -622,10 +630,59 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
+    private var transcriptionModelPickerRow: some View {
+        HStack {
+            Text("Transcribe")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(DS.Colors.textSecondary)
+
+            Spacer()
+
+            HStack(spacing: 0) {
+                transcriptionModelOptionButton(
+                    label: "GPT-4o",
+                    modelID: OpenAIRealtimeTranscriptionModel.gpt4oTranscribe.rawValue
+                )
+                transcriptionModelOptionButton(
+                    label: "Mini",
+                    modelID: OpenAIRealtimeTranscriptionModel.gpt4oMiniTranscribe.rawValue
+                )
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.white.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+        }
+        .padding(.vertical, 4)
+    }
+
     private func modelOptionButton(label: String, modelID: String) -> some View {
         let isSelected = companionManager.selectedModel == modelID
         return Button(action: {
             companionManager.setSelectedModel(modelID)
+        }) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(isSelected ? DS.Colors.textPrimary : DS.Colors.textTertiary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isSelected ? Color.white.opacity(0.1) : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+    }
+
+    private func transcriptionModelOptionButton(label: String, modelID: String) -> some View {
+        let isSelected = companionManager.selectedRealtimeTranscriptionModel == modelID
+        return Button(action: {
+            companionManager.setSelectedRealtimeTranscriptionModel(modelID)
         }) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))

@@ -14,9 +14,9 @@ The real OpenAI API key lives on a Cloudflare Worker proxy. The app connects dir
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: OpenAI Responses API (`gpt-5.4` default, `gpt-5.4-mini` optional) via Cloudflare Worker proxy with SSE streaming
+- **AI Chat**: OpenAI Responses API (`gpt-5.4` default, `gpt-5.4-mini` optional) via direct OpenAI calls in local dev when `OPENAI_API_KEY` is present, otherwise via Cloudflare Worker proxy with SSE streaming
 - **Speech-to-Text**: OpenAI Realtime transcription (`gpt-4o-transcribe`) via websocket, with Apple Speech as the local fallback
-- **Text-to-Speech**: OpenAI speech API (`gpt-4o-mini-tts`, `cedar` voice by default) via Cloudflare Worker proxy
+- **Text-to-Speech**: OpenAI speech API (`gpt-4o-mini-tts`, `cedar` voice by default) via direct OpenAI calls in local dev when `OPENAI_API_KEY` is present, otherwise via Cloudflare Worker proxy
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: The model embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
@@ -25,7 +25,7 @@ The real OpenAI API key lives on a Cloudflare Worker proxy. The app connects dir
 
 ### API Proxy (Cloudflare Worker)
 
-The app sends multimodal chat and TTS through a Cloudflare Worker (`worker/src/index.ts`) that holds the real API key. For transcription, the worker creates an ephemeral Realtime transcription session and the app uses the returned client secret to open a direct websocket to OpenAI Realtime.
+The app sends multimodal chat, TTS, and transcription through direct OpenAI API calls in local dev when `OPENAI_API_KEY` is present in the app process environment. Otherwise it uses a Cloudflare Worker (`worker/src/index.ts`) that holds the real API key. For transcription, the app opens a direct websocket to OpenAI Realtime using the client secret returned by either OpenAI directly in dev mode or the worker in proxy mode.
 
 | Route | Upstream | Purpose |
 |-------|----------|---------|
@@ -70,8 +70,8 @@ Worker vars: `OPENAI_TTS_MODEL`, `OPENAI_TTS_VOICE`
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
-| `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
-| `ProxyConfiguration.swift` | ~20 | Shared helper for worker-backed route URLs. Reads `WorkerBaseURL` from Info.plist and exposes the OpenAI proxy endpoints used by the app. |
+| `AppBundleConfiguration.swift` | ~35 | Runtime configuration reader. Prefers process environment variables in local dev, then falls back to keys stored in the app bundle Info.plist. |
+| `ProxyConfiguration.swift` | ~50 | Shared helper for OpenAI transport configuration. Prefers direct OpenAI endpoints when `OPENAI_API_KEY` is present, otherwise exposes worker-backed proxy URLs and TTS defaults. |
 | `worker/src/index.ts` | ~143 | Cloudflare Worker proxy. Three routes: `/responses` (OpenAI Responses), `/speech` (OpenAI speech), and `/transcription-session` (Realtime client-secret minting). |
 
 ## Build & Run

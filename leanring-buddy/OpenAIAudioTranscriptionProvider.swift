@@ -8,6 +8,35 @@
 import AVFoundation
 import Foundation
 
+enum OpenAIRealtimeTranscriptionModel: String, CaseIterable {
+    case gpt4oTranscribe = "gpt-4o-transcribe"
+    case gpt4oMiniTranscribe = "gpt-4o-mini-transcribe"
+
+    static let userDefaultsKey = "selectedOpenAIRealtimeTranscriptionModel"
+
+    var shortDisplayName: String {
+        switch self {
+        case .gpt4oTranscribe:
+            return "GPT-4o"
+        case .gpt4oMiniTranscribe:
+            return "Mini"
+        }
+    }
+
+    static var currentSelection: OpenAIRealtimeTranscriptionModel {
+        if let storedModelIdentifier = UserDefaults.standard.string(forKey: userDefaultsKey),
+           let storedModel = OpenAIRealtimeTranscriptionModel(rawValue: storedModelIdentifier) {
+            return storedModel
+        }
+
+        return .gpt4oTranscribe
+    }
+
+    static func persistSelection(_ model: OpenAIRealtimeTranscriptionModel) {
+        UserDefaults.standard.set(model.rawValue, forKey: userDefaultsKey)
+    }
+}
+
 struct OpenAIAudioTranscriptionProviderError: LocalizedError {
     let message: String
 
@@ -17,14 +46,22 @@ struct OpenAIAudioTranscriptionProviderError: LocalizedError {
 }
 
 final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
-    private static let transcriptionModelName = "gpt-4o-transcribe-latest"
     private static let realtimeInputSampleRate = 24_000
 
     let displayName = "OpenAI Realtime"
     let requiresSpeechRecognitionPermission = false
 
-    var isConfigured: Bool { true }
-    var unavailableExplanation: String? { nil }
+    var isConfigured: Bool {
+        ProxyConfiguration.shouldUseDirectOpenAI
+            || ProxyConfiguration.workerBaseURLString != "https://your-worker-name.your-subdomain.workers.dev"
+    }
+    var unavailableExplanation: String? {
+        if isConfigured {
+            return nil
+        }
+
+        return "set OPENAI_API_KEY in your Xcode run environment or configure WorkerBaseURL."
+    }
 
     /// Single long-lived URLSession shared across all streaming sessions.
     /// Creating and invalidating a URLSession per session corrupts the OS
@@ -37,11 +74,32 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) async throws -> any BuddyStreamingTranscriptionSession {
-        let clientSecret = try await fetchRealtimeClientSecret(keyterms: keyterms)
-        print("🎙️ OpenAI Realtime: fetched ephemeral client secret (\(clientSecret.prefix(20))...)")
+        let realtimeSessionConfiguration = makeRealtimeSessionRequestBody(keyterms: keyterms)
+        let selectedRealtimeTranscriptionModel = OpenAIRealtimeTranscriptionModel.currentSelection
+
+        let authorizationBearerToken: String
+        let initialSessionConfiguration: [String: Any]?
+
+        if let directOpenAIAPIKey = ProxyConfiguration.openAIAPIKey {
+            authorizationBearerToken = directOpenAIAPIKey
+            initialSessionConfiguration = makeRealtimeSessionUpdateEvent(
+                from: realtimeSessionConfiguration
+            )
+            print(
+                "🎙️ OpenAI Realtime: using direct API key authentication for dev mode (\(selectedRealtimeTranscriptionModel.rawValue))"
+            )
+        } else {
+            let clientSecret = try await fetchRealtimeClientSecret(keyterms: keyterms)
+            authorizationBearerToken = clientSecret
+            initialSessionConfiguration = nil
+            print(
+                "🎙️ OpenAI Realtime: fetched ephemeral client secret (\(clientSecret.prefix(20))...) for \(selectedRealtimeTranscriptionModel.rawValue)"
+            )
+        }
 
         let session = OpenAIRealtimeTranscriptionSession(
-            clientSecret: clientSecret,
+            authorizationBearerToken: authorizationBearerToken,
+            initialSessionConfiguration: initialSessionConfiguration,
             urlSession: sharedWebSocketURLSession,
             onTranscriptUpdate: onTranscriptUpdate,
             onFinalTranscriptReady: onFinalTranscriptReady,
@@ -56,6 +114,9 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
         var request = URLRequest(url: URL(string: ProxyConfiguration.transcriptionSessionProxyURLString)!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let authorizationHeaderValue = ProxyConfiguration.authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONSerialization.data(
             withJSONObject: makeRealtimeSessionRequestBody(keyterms: keyterms)
         )
@@ -76,31 +137,61 @@ final class OpenAIAudioTranscriptionProvider: BuddyTranscriptionProvider {
 
     private func makeRealtimeSessionRequestBody(keyterms: [String]) -> [String: Any] {
         let prompt = makeTranscriptionBiasPrompt(from: keyterms)
+        let selectedRealtimeTranscriptionModel = OpenAIRealtimeTranscriptionModel.currentSelection
 
         return [
+            "input_audio_format": "pcm16",
+            "input_audio_transcription": [
+                "model": selectedRealtimeTranscriptionModel.rawValue,
+                "prompt": prompt,
+                "language": "en"
+            ],
+            "turn_detection": [
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 500
+            ],
+            "input_audio_noise_reduction": [
+                "type": "near_field"
+            ]
+        ]
+    }
+
+    private func makeRealtimeSessionUpdateEvent(
+        from transcriptionSessionConfiguration: [String: Any]
+    ) -> [String: Any] {
+        var realtimeAudioInputConfiguration: [String: Any] = [
+            "format": [
+                "type": "audio/pcm",
+                "rate": Self.realtimeInputSampleRate
+            ]
+        ]
+
+        if let inputAudioTranscription = transcriptionSessionConfiguration["input_audio_transcription"] {
+            realtimeAudioInputConfiguration["transcription"] = inputAudioTranscription
+        }
+        if let turnDetection = transcriptionSessionConfiguration["turn_detection"] {
+            realtimeAudioInputConfiguration["turn_detection"] = turnDetection
+        }
+        if let inputAudioNoiseReduction = transcriptionSessionConfiguration["input_audio_noise_reduction"] {
+            realtimeAudioInputConfiguration["noise_reduction"] = inputAudioNoiseReduction
+        }
+
+        var realtimeSessionConfiguration: [String: Any] = [
             "type": "transcription",
             "audio": [
-                "input": [
-                    "format": [
-                        "type": "audio/pcm",
-                        "rate": Self.realtimeInputSampleRate
-                    ],
-                    "noise_reduction": [
-                        "type": "near_field"
-                    ],
-                    "transcription": [
-                        "model": Self.transcriptionModelName,
-                        "prompt": prompt,
-                        "language": "en"
-                    ],
-                    "turn_detection": [
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500
-                    ]
-                ]
+                "input": realtimeAudioInputConfiguration
             ]
+        ]
+
+        if let include = transcriptionSessionConfiguration["include"] {
+            realtimeSessionConfiguration["include"] = include
+        }
+
+        return [
+            "type": "session.update",
+            "session": realtimeSessionConfiguration
         ]
     }
 
@@ -179,7 +270,8 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
 
     let finalTranscriptFallbackDelaySeconds: TimeInterval = 2.8
 
-    private let clientSecret: String
+    private let authorizationBearerToken: String
+    private let initialSessionConfiguration: [String: Any]?
     private let onTranscriptUpdate: (String) -> Void
     private let onFinalTranscriptReady: (String) -> Void
     private let onError: (Error) -> Void
@@ -199,13 +291,15 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
     private var explicitFinalTranscriptDeadlineWorkItem: DispatchWorkItem?
 
     init(
-        clientSecret: String,
+        authorizationBearerToken: String,
+        initialSessionConfiguration: [String: Any]?,
         urlSession: URLSession,
         onTranscriptUpdate: @escaping (String) -> Void,
         onFinalTranscriptReady: @escaping (String) -> Void,
         onError: @escaping (Error) -> Void
     ) {
-        self.clientSecret = clientSecret
+        self.authorizationBearerToken = authorizationBearerToken
+        self.initialSessionConfiguration = initialSessionConfiguration
         self.urlSession = urlSession
         self.onTranscriptUpdate = onTranscriptUpdate
         self.onFinalTranscriptReady = onFinalTranscriptReady
@@ -220,13 +314,17 @@ private final class OpenAIRealtimeTranscriptionSession: NSObject, BuddyStreaming
         }
 
         var websocketRequest = URLRequest(url: websocketURL)
-        websocketRequest.setValue("Bearer \(clientSecret)", forHTTPHeaderField: "Authorization")
+        websocketRequest.setValue("Bearer \(authorizationBearerToken)", forHTTPHeaderField: "Authorization")
 
         let webSocketTask = urlSession.webSocketTask(with: websocketRequest)
         self.webSocketTask = webSocketTask
         webSocketTask.resume()
 
         receiveNextMessage()
+
+        if let initialSessionConfiguration {
+            sendJSONMessage(initialSessionConfiguration)
+        }
     }
 
     func appendAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
