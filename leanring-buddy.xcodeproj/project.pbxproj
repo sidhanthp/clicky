@@ -411,7 +411,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 2UDAY4J48G;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -419,11 +419,8 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "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";
-				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
-				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
-				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
-				INFOPLIST_KEY_CFBundleName = Clicky;
+				INFOPLIST_KEY_CFBundleDisplayName = "Clicky Dev";
+				INFOPLIST_KEY_CFBundleName = "Clicky Dev";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSScreenCaptureUsageDescription = "Clicky needs screen recording access to see your screen and help you.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -431,8 +428,8 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.yourcompany.leanring-buddy";
-				PRODUCT_NAME = Clicky;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.yourcompany.leanring-buddy.dev";
+				PRODUCT_NAME = "Clicky Dev";
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -452,7 +449,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 2UDAY4J48G;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
@@ -460,9 +457,6 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "leanring-buddy/Info.plist";
-				INFOPLIST_KEY_AnthropicAPIKey = "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";
-				INFOPLIST_KEY_AnthropicAPIURL = "https://api.anthropic.com/v1/messages";
-				INFOPLIST_KEY_AnthropicModel = "claude-sonnet-4-6";
 				INFOPLIST_KEY_CFBundleDisplayName = Clicky;
 				INFOPLIST_KEY_CFBundleName = Clicky;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -490,7 +484,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6D7X9GGZAW;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 1.0;
@@ -511,7 +505,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6D7X9GGZAW;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.2;
 				MARKETING_VERSION = 1.0;
@@ -531,7 +525,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6D7X9GGZAW;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.yourcompany.leanring-buddyUITests";
@@ -550,7 +544,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 6D7X9GGZAW;
+				DEVELOPMENT_TEAM = JV39F5S8VN;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.yourcompany.leanring-buddyUITests";

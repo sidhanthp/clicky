@@ -3,4 +3,5 @@ main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
 [vars]
-ELEVENLABS_VOICE_ID = "kPzsL2i3teMYv0FxEYQ6"
+OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
+OPENAI_TTS_VOICE = "cedar"

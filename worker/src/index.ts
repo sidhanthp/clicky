@@ -1,19 +1,19 @@
 /**
  * Clicky Proxy Worker
  *
- * Proxies requests to Claude and ElevenLabs APIs so the app never
- * ships with raw API keys. Keys are stored as Cloudflare secrets.
+ * Proxies requests to OpenAI APIs so the app never ships with raw API keys.
+ * Keys are stored as Cloudflare secrets.
  *
  * Routes:
- *   POST /chat  → Anthropic Messages API (streaming)
- *   POST /tts   → ElevenLabs TTS API
+ *   POST /responses             → OpenAI Responses API
+ *   POST /speech                → OpenAI Audio Speech API
+ *   POST /transcription-session → OpenAI Realtime transcription session API
  */
 
 interface Env {
-  ANTHROPIC_API_KEY: string;
-  ELEVENLABS_API_KEY: string;
-  ELEVENLABS_VOICE_ID: string;
-  ASSEMBLYAI_API_KEY: string;
+  OPENAI_API_KEY: string;
+  OPENAI_TTS_MODEL?: string;
+  OPENAI_TTS_VOICE?: string;
 }
 
 export default {
@@ -25,16 +25,16 @@ export default {
     }
 
     try {
-      if (url.pathname === "/chat") {
-        return await handleChat(request, env);
+      if (url.pathname === "/responses") {
+        return await handleResponses(request, env);
       }
 
-      if (url.pathname === "/tts") {
-        return await handleTTS(request, env);
+      if (url.pathname === "/speech") {
+        return await handleSpeech(request, env);
       }
 
-      if (url.pathname === "/transcribe-token") {
-        return await handleTranscribeToken(env);
+      if (url.pathname === "/transcription-session") {
+        return await handleTranscriptionSession(request, env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -48,22 +48,22 @@ export default {
   },
 };
 
-async function handleChat(request: Request, env: Env): Promise<Response> {
+async function handleResponses(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
       "content-type": "application/json",
+      Accept: request.headers.get("accept") || "application/json",
     },
     body,
   });
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/chat] Anthropic API error ${response.status}: ${errorBody}`);
+    console.error(`[/responses] OpenAI Responses API error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
@@ -73,59 +73,61 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   return new Response(response.body, {
     status: response.status,
     headers: {
-      "content-type": response.headers.get("content-type") || "text/event-stream",
+      "content-type": response.headers.get("content-type") || "application/json",
       "cache-control": "no-cache",
     },
   });
 }
 
-async function handleTranscribeToken(env: Env): Promise<Response> {
-  const response = await fetch(
-    "https://streaming.assemblyai.com/v3/token?expires_in_seconds=480",
-    {
-      method: "GET",
-      headers: {
-        authorization: env.ASSEMBLYAI_API_KEY,
-      },
-    }
-  );
+async function handleTranscriptionSession(request: Request, env: Env): Promise<Response> {
+  const body = await request.text();
+
+  const response = await fetch("https://api.openai.com/v1/realtime/transcription_sessions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body,
+  });
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/transcribe-token] AssemblyAI token error ${response.status}: ${errorBody}`);
+    console.error(`[/transcription-session] OpenAI Realtime session error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
     });
   }
 
-  const data = await response.text();
-  return new Response(data, {
-    status: 200,
+  return new Response(response.body, {
+    status: response.status,
     headers: { "content-type": "application/json" },
   });
 }
 
-async function handleTTS(request: Request, env: Env): Promise<Response> {
-  const body = await request.text();
-  const voiceId = env.ELEVENLABS_VOICE_ID;
+async function handleSpeech(request: Request, env: Env): Promise<Response> {
+  const requestBody = await request.json<Record<string, unknown>>();
+  const speechRequestBody = {
+    model: env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts",
+    voice: env.OPENAI_TTS_VOICE || "cedar",
+    format: "mp3",
+    ...requestBody,
+  };
 
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": env.ELEVENLABS_API_KEY,
-        "content-type": "application/json",
-        accept: "audio/mpeg",
-      },
-      body,
-    }
-  );
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json",
+      accept: "audio/mpeg",
+    },
+    body: JSON.stringify(speechRequestBody),
+  });
 
   if (!response.ok) {
     const errorBody = await response.text();
-    console.error(`[/tts] ElevenLabs API error ${response.status}: ${errorBody}`);
+    console.error(`[/speech] OpenAI speech API error ${response.status}: ${errorBody}`);
     return new Response(errorBody, {
       status: response.status,
       headers: { "content-type": "application/json" },
